@@ -8,7 +8,7 @@ import threading
 # Hardcoded users
 users = {
     "0437": {"username": "nina", "password": "4707"},
-    "1111": {"username": "muub", "password": "2222"},
+    "1234": {"username": "admin", "password": "0000"},
 }
 
 # Item database
@@ -34,15 +34,26 @@ server.bind(("0.0.0.0", 12345))
 server.listen(2) # Allow up to 2 connections
 print("Waiting for connection from client...")
 
+# Global reference to the Android client socket and user_id
+android_conn = None 
+
 # Event to signal when to properly stop NFC reading/client message handling
 stop_event = threading.Event()
 
 # Function to be able to handle multiple clients
 def client_thread(conn, addr):
     print(f"Connected to {addr}")
+    global android_conn, nfc_active
+    login_success, returned_user_id = handle_login(conn)
     try:
-        if handle_login(conn):
-            print("Login successful. Starting NFC loop.")
+        if login_success:
+            print(f"Login successful. User ID: {returned_user_id}")
+
+            # If this is the Android app, store the connection
+            if returned_user_id == "1234":  # or whatever ID Android uses
+                android_conn = conn
+                print("Stored Android connection.")
+
             # Start threads (non-daemon now)
             nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
             client_messages = threading.Thread(target=handle_client_messages, args=(conn,))
@@ -65,6 +76,8 @@ def client_thread(conn, addr):
     finally:
         conn.close()
         print(f"Connection to {addr} closed.")
+        if conn == android_conn:
+            android_conn = None
 
 def handle_login(conn):
     try:
@@ -74,14 +87,15 @@ def handle_login(conn):
             user_id, password = parts[1], parts[2]
             user = users.get(user_id)
             if user and user["password"] == password:
-                conn.send(f"LOGIN_SUCCESS,{user['username']}".encode())
-                return True
-        conn.send("LOGIN_FAILED".encode())
-        return False
+                conn.send(f"LOGIN_SUCCESS,{user['username']}\n".encode())
+                print(f"User: {user['username']} with user_id: {user_id} logged in successfully.")
+                return True, user_id
+        conn.send("LOGIN_FAILED\n".encode())
+        return False, None
     except Exception as e:
         print(f"Login error: {e}")
-        conn.send("LOGIN_FAILED".encode())
-        return False
+        conn.send("LOGIN_FAILED\n".encode())
+        return False, None
 
 def nfc_reader_loop(conn):
     global nfc_active
@@ -117,7 +131,7 @@ def nfc_reader_loop(conn):
         time.sleep(0.1)
 
 def handle_client_messages(conn):
-    global nfc_active
+    global nfc_active, user_id, android_conn
     while True:
         try:
             # Check if connection is still valid
@@ -133,6 +147,15 @@ def handle_client_messages(conn):
             if data == "NONSCAN_REQUEST":
                 print("Received non-scan request. Pausing NFC.")
                 nfc_active = False
+
+                try:
+                    if android_conn:
+                        android_conn.sendall("NONSCAN_REQUEST\n".encode())
+                        print("Forwarded non-scan request to Android.")
+                    else:
+                        print("No Android connection to forward request.")
+                except Exception as e:
+                    print(f"Error sending to Android: {e}")
 
             elif data == "NFC_RESTART":
                 print("Received request to restart NFC scan. Restarting NFC.")
