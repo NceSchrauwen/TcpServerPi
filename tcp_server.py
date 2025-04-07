@@ -13,9 +13,9 @@ users = {
 
 # Item database
 item_database = {
-    "0x466aca01": {"name": "The Downtown Lights", "price": 19.75},
-    "0x238d5930": {"name": "The Way I Loved You", "price": 13.13},
-    "0x540adea3": {"name": "Wicked Games", "price": 1.20}
+    "0x466aca01": {"name": "The Downtown Lights", "price": "€19.75"},
+    "0x238d5930": {"name": "Fresh Out The Slammer", "price": "€13.13"},
+    "0x540adea3": {"name": "Wicked Games", "price": "€6.66"}
 }
 
 # NFC setup
@@ -34,8 +34,11 @@ server.bind(("0.0.0.0", 12345))
 server.listen(2) # Allow up to 2 connections
 print("Waiting for connection from client...")
 
-# Global reference to the Android client socket and user_id
-android_conn = None 
+# Global reference to the Android/Desktop client socket 
+connections = {
+    "android": None,
+    "desktop": None
+}
 
 # Event to signal when to properly stop NFC reading/client message handling
 stop_event = threading.Event()
@@ -51,8 +54,11 @@ def client_thread(conn, addr):
 
             # If this is the Android app, store the connection
             if returned_user_id == "1234":  # or whatever ID Android uses
-                android_conn = conn
+                connections["android"] = conn
                 print("Stored Android connection.")
+            else:
+                connections["desktop"] = conn
+                print("Stored Desktop connection")
 
             # Start threads (non-daemon now)
             nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
@@ -76,8 +82,12 @@ def client_thread(conn, addr):
     finally:
         conn.close()
         print(f"Connection to {addr} closed.")
-        if conn == android_conn:
-            android_conn = None
+        
+        if conn == connections["android"]:
+            connections["android"] = None
+            
+        if conn == connections["desktop"]:
+            connections["desktop"] = None
 
 def handle_login(conn):
     try:
@@ -118,7 +128,9 @@ def nfc_reader_loop(conn):
 
                 if uid_str in item_database:
                     item = item_database[uid_str]
-                    message = f"Item found: {item['name']}, Price: ${item['price']:.2f}, UID: {uid_str}"
+                    price = item['price'] 
+                    price_str = float(price.replace('€', ''))
+                    message = f"{item['name']}, Price: €{price_str:.2f}, UID: {uid_str}"
                 else:
                     message = f"Item not found, UID: {uid_str}"
 
@@ -126,12 +138,16 @@ def nfc_reader_loop(conn):
                 conn.send(message.encode())
             else:
                 print("No NFC tag detected.")
+        except BrokenPipeError:
+            print("Broken pipe error. Connection might be closed.")
+            break
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"NFC reader error: {e}")
+            break
         time.sleep(0.1)
 
 def handle_client_messages(conn):
-    global nfc_active, user_id, android_conn
+    global nfc_active, user_id, android_conn, desktop_conn
     while True:
         try:
             # Check if connection is still valid
@@ -149,8 +165,8 @@ def handle_client_messages(conn):
                 nfc_active = False
 
                 try:
-                    if android_conn:
-                        android_conn.sendall("NONSCAN_REQUEST\n".encode())
+                    if connections["android"]:
+                        connections["android"].sendall("NONSCAN_REQUEST\n".encode())
                         print("Forwarded non-scan request to Android.")
                     else:
                         print("No Android connection to forward request.")
@@ -160,10 +176,20 @@ def handle_client_messages(conn):
             elif data == "NFC_RESTART":
                 print("Received request to restart NFC scan. Restarting NFC.")
                 nfc_active = True
-
+                
+            elif data.strip().upper() in ["APPROVED", "DENIED"]:
+                print(f"Non-scan approval request from android is: {data}")
+                
+                if connections["desktop"]:
+                    connections["desktop"].sendall(f"{data}\n".encode())
+                    print("Response forwarded to desktop")
+                else:
+                    print("No desktop connection established, unable to send response")
             else:
                 print(f"Received unrecognized message: {data}")
-
+        except BrokenPipeError:
+            print("Broken pipe error. Connection might be closed.")
+            break
         except Exception as e:
             print(f"Error handling client message: {e}")
             break
@@ -180,4 +206,3 @@ except KeyboardInterrupt:
 finally:
     server.close()
     print("Server socket closed.")
-
