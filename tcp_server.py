@@ -28,6 +28,10 @@ print("PN532 (NFC) is ready.")
 # Global variable to set current state of NFC reader
 nfc_active = True
 
+# Global variable to store if a non-scan request was sent
+# This is used to prevent providing multiple non-scan requests in a row
+last_nonscan_sent = False
+
 # Socket setup
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind(("0.0.0.0", 12345))
@@ -147,7 +151,7 @@ def nfc_reader_loop(conn):
         time.sleep(0.1)
 
 def handle_client_messages(conn):
-    global nfc_active, user_id, android_conn, desktop_conn
+    global nfc_active, user_id, android_conn, desktop_conn, last_nonscan_sent
     while True:
         try:
             # Check if connection is still valid
@@ -163,6 +167,9 @@ def handle_client_messages(conn):
             if data == "NONSCAN_REQUEST":
                 print("Received non-scan request. Pausing NFC.")
                 nfc_active = False
+                # Keep track of the last non-scan request sent
+                last_nonscan_sent = True
+                print("Sending non-scan request to Android.")
 
                 try:
                     if connections["android"]:
@@ -176,6 +183,19 @@ def handle_client_messages(conn):
             elif data == "NFC_RESTART":
                 print("Received request to restart NFC scan. Restarting NFC.")
                 nfc_active = True
+
+            elif data == "FETCH_LATEST":
+                if last_nonscan_sent:
+                    try:
+                        conn.sendall("NONSCAN_REQUEST\n".encode())
+                        # Reset the last non-scan request flag, as we are resending it
+                        # This is to prevent sending multiple non-scan requests in a row without a new request
+                        last_nonscan_sent = False
+                        print("Sent last non-scan request again upon fetch request from android.")
+                    except Exception as e:
+                        print(f"Failed to resend non-scan request: {e}")
+                else:
+                    print("No non-scan request to resend.")
                 
             elif data.strip().upper() in ["APPROVED", "DENIED"]:
                 print(f"Non-scan approval request from android is: {data}")
