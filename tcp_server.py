@@ -5,16 +5,20 @@ import busio
 from adafruit_pn532.i2c import PN532_I2C
 import threading
 
-# Hardcoded users
-users = {
-    "0437": {"username": "nina", "password": "4707"},
+admin_users = {
     "1234": {"username": "admin", "password": "0000"},
+    "0000": {"username": "admin", "password": "0000"},
+}
+
+desktop_users = {
+    "0437": {"username": "nina", "password": "4707"},
+    "1999": {"username": "maud", "password": "1999"},
 }
 
 # Item database
 item_database = {
     "0x466aca01": {"name": "The Downtown Lights", "price": "€19.75"},
-    "0x238d5930": {"name": "Fresh Out The Slammer", "price": "€13.13"},
+    # "0x238d5930": {"name": "Fresh Out The Slammer", "price": "€13.13"},
     "0x540adea3": {"name": "Wicked Games", "price": "€6.66"}
 }
 
@@ -57,12 +61,16 @@ def client_thread(conn, addr):
             print(f"Login successful. User ID: {returned_user_id}")
 
             # If this is the Android app, store the connection
-            if returned_user_id == "1234":  # or whatever ID Android uses
+            if returned_user_id in admin_users:  # or whatever ID Android uses
                 connections["android"] = conn
                 print("Stored Android connection.")
-            else:
+            elif returned_user_id in desktop_users:  # or whatever ID Desktop uses
                 connections["desktop"] = conn
                 print("Stored Desktop connection")
+            else:
+                print("Unknown user ID. Closing connection.")
+                conn.close()
+                return
 
             # Start threads (non-daemon now)
             nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
@@ -99,7 +107,17 @@ def handle_login(conn):
         parts = data.strip().split(',')
         if len(parts) == 3 and parts[0] == "LOGIN":
             user_id, password = parts[1], parts[2]
-            user = users.get(user_id)
+            # user = users.get(user_id)
+
+            if user_id in admin_users:
+                user = admin_users[user_id]
+            elif user_id in desktop_users:
+                user = desktop_users[user_id]
+            else:
+                print(f"Unknown user ID: {user_id}")
+                conn.send("LOGIN_FAILED\n".encode())
+                return False, None
+            
             if user and user["password"] == password:
                 conn.send(f"LOGIN_SUCCESS,{user['username']}\n".encode())
                 print(f"User: {user['username']} with user_id: {user_id} logged in successfully.")
@@ -136,7 +154,7 @@ def nfc_reader_loop(conn):
                     price_str = float(price.replace('€', ''))
                     message = f"{item['name']}, Price: €{price_str:.2f}, UID: {uid_str}"
                 else:
-                    message = f"Item not found, UID: {uid_str}"
+                    message = f"UID not found in db, UID: {uid_str}"
 
                 print("Sending message: ", message)
                 conn.send(message.encode())
@@ -148,7 +166,7 @@ def nfc_reader_loop(conn):
         except Exception as e:
             print(f"NFC reader error: {e}")
             break
-        time.sleep(0.1)
+        time.sleep(1.5) # Adjust the sleep time as needed
 
 def handle_client_messages(conn):
     global nfc_active, user_id, android_conn, desktop_conn, last_nonscan_sent
