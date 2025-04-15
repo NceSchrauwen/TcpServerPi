@@ -214,6 +214,14 @@ def handle_client_messages(conn):
                         print(f"Failed to resend non-scan request: {e}")
                 else:
                     print("No non-scan request to resend.")
+
+            elif data.strip().upper() == "LOGOUT":
+                print("Received logout request. Closing connection.")
+                break # This will exit the loop and close the connection
+
+            elif data.strip().upper() == "PING":
+                print("Received ping request. Sending pong.")
+                conn.sendall("PONG\n".encode())
                 
             elif data.strip().upper() in ["APPROVED", "DENIED"]:
                 print(f"Non-scan approval request from android is: {data}")
