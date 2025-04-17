@@ -4,6 +4,7 @@ import board
 import busio
 from adafruit_pn532.i2c import PN532_I2C
 import threading
+import RPi.GPIO as GPIO
 
 admin_users = {
     "1234": {"username": "admin", "password": "0000"},
@@ -21,6 +22,12 @@ item_database = {
     # "0x238d5930": {"name": "Fresh Out The Slammer", "price": "€13.13"},
     "0x540adea3": {"name": "Wicked Games", "price": "€6.66"}
 }
+
+#Led setup
+LED_PIN = 18
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(LED_PIN, GPIO.OUT)
+GPIO.output(LED_PIN, GPIO.LOW)  # Turn off the LED initially
 
 # NFC setup
 i2c = busio.I2C(board.SCL, board.SDA)
@@ -50,6 +57,30 @@ connections = {
 
 # Event to signal when to properly stop NFC reading/client message handling
 stop_event = threading.Event()
+
+# Function to blink the LED when a recognized UID is detected
+def blink_led():
+    # Run blinking in a separate thread so the scanning can continue
+    def _blink():
+        GPIO.output(LED_PIN, GPIO.HIGH)  # Turn on the LED
+        time.sleep(0.5)  # Keep it on for 0.5 seconds
+        GPIO.output(LED_PIN, GPIO.LOW)  # Turn off the LED
+    threading.Thread(target=_blink, daemon=True).start()
+
+# Function to blink the LED multiple times when the UID is not recognized
+def blink_multiple_led():
+    i = 0
+    # Run blinking in a separate thread so the scanning can continue
+    def _blink_multiple(i):
+        # Let it blink 3 times, it indicates that the uid was not recognized
+        while i < 3:
+            GPIO.output(LED_PIN, GPIO.HIGH)  # Turn on the LED
+            time.sleep(0.3)  # Keep it on for 0.3 seconds
+            GPIO.output(LED_PIN, GPIO.LOW)  # Turn off the LED
+            time.sleep(0.3) # Keep it off for 0.3 seconds
+            i += 1
+    threading.Thread(target=_blink_multiple(i), daemon=True).start()
+    
 
 # Function to be able to handle multiple clients
 def client_thread(conn, addr):
@@ -115,22 +146,37 @@ def handle_login(conn):
                 user = desktop_users[user_id]
             else:
                 print(f"Unknown user ID: {user_id}")
-                conn.send("LOGIN_FAILED\n".encode())
+
+                try:
+                    conn.send("LOGIN_FAILED\n".encode())
+                except:
+                    pass
                 return False, None
             
             if user and user["password"] == password:
                 conn.send(f"LOGIN_SUCCESS,{user['username']}\n".encode())
                 print(f"User: {user['username']} with user_id: {user_id} logged in successfully.")
                 return True, user_id
-        conn.send("LOGIN_FAILED\n".encode())
+            
+        try:
+            conn.send("LOGIN_FAILED\n".encode())
+        except:
+            pass
         return False, None
+    
     except Exception as e:
         print(f"Login error: {e}")
-        conn.send("LOGIN_FAILED\n".encode())
+
+        try:
+            conn.send("LOGIN_FAILED\n".encode())
+        except:
+            print("Send failed after login error (probably client disconnected early).")
         return False, None
 
 def nfc_reader_loop(conn):
     global nfc_active
+    last_uid = None
+    last_uid_time = 0
     while True:
         try:
             if not nfc_active:
@@ -147,15 +193,34 @@ def nfc_reader_loop(conn):
             if uid:
                 uid_str = '0x' + ''.join([format(i, '02x') for i in uid])
                 print(f"UID detected: {uid_str}")
+                current_time = time.time()
+
+                # If the UID is the same as before and the time difference is less than 1.5 seconds then ignore it
+                # This is to prevent sending the same UID multiple times within a short period
+                if uid_str == last_uid and (current_time - last_uid_time) < 1.5:
+                    print("Duplicate UID detected. Ignoring.")
+                    continue
+                
+                # Update the last UID and time to the current UID and time
+                last_uid = uid_str
+                last_uid_time = current_time
 
                 if uid_str in item_database:
                     item = item_database[uid_str]
                     price = item['price'] 
                     price_str = float(price.replace('€', ''))
                     message = f"{item['name']}, Price: €{price_str:.2f}, UID: {uid_str}"
+                    # TODO: Add blink led function for recognized uids
+                    blink_led() # Trigger the led because the uid was recognized
+                    print("Blinking LED for recognized UID.")
+                    
                 else:
                     message = f"UID not found in db, UID: {uid_str}"
+                    # TODO: Add multiple blink led function for unrecognized uids
+                    blink_multiple_led() # Trigger the led because the uid was not recognized
+                    print("Blinking LED for unrecognized UID.")
 
+                # Send the message to the connected client
                 print("Sending message: ", message)
                 conn.send(message.encode())
             else:
@@ -166,21 +231,26 @@ def nfc_reader_loop(conn):
         except Exception as e:
             print(f"NFC reader error: {e}")
             break
-        time.sleep(1.5) # Adjust the sleep time as needed
+        time.sleep(0.1) # Or remove completely if you want to read as fast as possible
 
 def handle_client_messages(conn):
     global nfc_active, user_id, android_conn, desktop_conn, last_nonscan_sent
+    conn.settimeout(0.2)  # Set a non-blocking timeout for the socket operations (200ms)
+    
     while True:
         try:
-            # Check if connection is still valid
             if conn.fileno() == -1:
                 print("Client message handler: Socket closed. Exiting thread.")
-                stop_event.set() # Stop the handler thread if the connection is closed
+                stop_event.set()
                 break
 
-            data = conn.recv(1024).decode().strip()
+            try:
+                data = conn.recv(1024).decode().strip()
+            except socket.timeout:
+                continue  # No data received during this interval — totally fine
+
             if not data:
-                break
+                continue
 
             if data == "NONSCAN_REQUEST":
                 print("Received non-scan request. Pausing NFC.")
