@@ -1,3 +1,7 @@
+# Project: Bp6 Non-scan TCP server project
+# Description: TCP-server that controls hardware-modules based on the input of the desktop and android-clients
+# Author: Nina Schrauwen
+
 import socket
 import time
 import board
@@ -79,7 +83,7 @@ def blink_multiple_led():
             GPIO.output(LED_PIN, GPIO.LOW)  # Turn off the LED
             time.sleep(0.3) # Keep it off for 0.3 seconds
             i += 1
-    threading.Thread(target=_blink_multiple(i), daemon=True).start()
+    threading.Thread(target=_blink_multiple, args=(i,), daemon=True).start()
     
 
 # Function to be able to handle multiple clients
@@ -103,19 +107,29 @@ def client_thread(conn, addr):
                 conn.close()
                 return
 
-            # Start threads (non-daemon now)
+            # Define threads 
             nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
             client_messages = threading.Thread(target=handle_client_messages, args=(conn,))
 
             # Reset the stop event before starting threads
             stop_event.clear()
             
+            # Start the threads
             nfc_thread.start()
             client_messages.start()
 
-            # Wait until one thread finishes (e.g. disconnection or crash)
-            nfc_thread.join()
-            client_messages.join()
+            # Both threads restart once they are no longer running
+            while not stop_event.is_set():
+                if not nfc_thread.is_alive():
+                    print("NFC thread died unexpectedly. Restarting it.")
+                    nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
+                    nfc_thread.start()
+                if not client_messages.is_alive():
+                    print("Client message thread ended. Restarting it.")
+                    client_messages = threading.Thread(target=handle_client_messages, args=(conn,))
+                    client_messages.start()
+                time.sleep(1)
+
         else:
             print("Login failed.")
     except KeyboardInterrupt:
@@ -172,12 +186,22 @@ def handle_login(conn):
         except:
             print("Send failed after login error (probably client disconnected early).")
         return False, None
+    
+# Function to make sure the timeout is passed properly so no blocking will occur   
+def safe_read_passive_target(pn532, timeout=1):
+    try:
+        return pn532.read_passive_target(timeout=timeout)
+    except Exception as e:
+        print(f"Error reading NFC: {e}")
+        return None
+
 
 def nfc_reader_loop(conn):
     global nfc_active
     last_uid = None
     last_uid_time = 0
-    while True:
+
+    while not stop_event.is_set():
         try:
             if not nfc_active:
                 time.sleep(0.2)
@@ -188,8 +212,9 @@ def nfc_reader_loop(conn):
                 print("NFC: Socket is closed. Exiting thread.")
                 stop_event.set() # Stop the NFC thread if the connection is closed
                 break
-
-            uid = pn532_module.read_passive_target(timeout=1)
+            
+            # Making sure there is a short timeout between scanning to prevent blocking
+            uid = safe_read_passive_target(pn532_module)
             if uid:
                 uid_str = '0x' + ''.join([format(i, '02x') for i in uid])
                 print(f"UID detected: {uid_str}")
@@ -210,13 +235,11 @@ def nfc_reader_loop(conn):
                     price = item['price'] 
                     price_str = float(price.replace('€', ''))
                     message = f"{item['name']}, Price: €{price_str:.2f}, UID: {uid_str}"
-                    # TODO: Add blink led function for recognized uids
                     blink_led() # Trigger the led because the uid was recognized
                     print("Blinking LED for recognized UID.")
                     
                 else:
                     message = f"UID not found in db, UID: {uid_str}"
-                    # TODO: Add multiple blink led function for unrecognized uids
                     blink_multiple_led() # Trigger the led because the uid was not recognized
                     print("Blinking LED for unrecognized UID.")
 
@@ -227,11 +250,14 @@ def nfc_reader_loop(conn):
                 print("No NFC tag detected.")
         except BrokenPipeError:
             print("Broken pipe error. Connection might be closed.")
+            stop_event.set()
             break
         except Exception as e:
             print(f"NFC reader error: {e}")
+            stop_event.set()
             break
-        time.sleep(0.1) # Or remove completely if you want to read as fast as possible
+        time.sleep(0.3) # Give it a little grace so it does not scan too quickly and start to glitch the I2C bus
+    print("NFC-reader stopped.")
 
 def handle_client_messages(conn):
     global nfc_active, user_id, android_conn, desktop_conn, last_nonscan_sent
@@ -271,6 +297,8 @@ def handle_client_messages(conn):
             elif data == "NFC_RESTART":
                 print("Received request to restart NFC scan. Restarting NFC.")
                 nfc_active = True
+                nfc_thread = threading.Thread(target=nfc_reader_loop, args=(conn,))
+                nfc_thread.start()
 
             elif data == "FETCH_LATEST":
                 if last_nonscan_sent:
